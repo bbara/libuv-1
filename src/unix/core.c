@@ -330,7 +330,7 @@ int uv_is_closing(const uv_handle_t* handle) {
 
 
 int uv_backend_fd(const uv_loop_t* loop) {
-  return loop->backend_fd;
+  return uv__get_backend_fd(loop);
 }
 
 
