@@ -103,6 +103,7 @@ extern char *mkdtemp(char *template); /* See issue #740 on AIX < 7 */
     if (req == NULL)                                                          \
       return UV_EINVAL;                                                       \
     UV_REQ_INIT(req, UV_FS);                                                  \
+    req->priv.fs_req_engine = UV__ENGINE_DEFAULT;                             \
     req->fs_type = UV_FS_ ## subtype;                                         \
     req->result = 0;                                                          \
     req->ptr = NULL;                                                          \
@@ -164,6 +165,15 @@ extern char *mkdtemp(char *template); /* See issue #740 on AIX < 7 */
     }                                                                         \
   }                                                                           \
   while (0)
+
+
+/* On Linux, some tasks try to use io_uring, but must be retried with the
+ * threadpool if it fails/operation isn't supported by io_uring. See def in
+ * linux-iouring.c.
+ */
+static int uv__fs_retry_with_threadpool(int rc) {
+  return rc == UV_ENOSYS || rc == UV_ENOTSUP || rc == UV_ENOMEM;
+}
 
 
 static int uv__fs_close(int fd) {
@@ -1639,7 +1649,7 @@ static ssize_t uv__fs_write_all(uv_fs_t* req) {
 }
 
 
-static void uv__fs_work(struct uv__work* w) {
+void uv__fs_work(struct uv__work* w) {
   int retry_on_eintr;
   uv_fs_t* req;
   ssize_t r;
@@ -1711,7 +1721,7 @@ static void uv__fs_work(struct uv__work* w) {
 }
 
 
-static void uv__fs_done(struct uv__work* w, int status) {
+void uv__fs_done(struct uv__work* w, int status) {
   uv_fs_t* req;
 
   req = container_of(w, uv_fs_t, work_req);
@@ -1826,8 +1836,13 @@ int uv_fs_fstat(uv_loop_t* loop, uv_fs_t* req, uv_file file, uv_fs_cb cb) {
 
 
 int uv_fs_fsync(uv_loop_t* loop, uv_fs_t* req, uv_file file, uv_fs_cb cb) {
+  int rc;
+
   INIT(FSYNC);
   req->file = file;
+  rc = uv__platform_fs_fsync(loop, req, file, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
   POST;
 }
 
@@ -1945,6 +1960,8 @@ int uv_fs_read(uv_loop_t* loop, uv_fs_t* req,
                unsigned int nbufs,
                int64_t off,
                uv_fs_cb cb) {
+  int rc;
+
   INIT(READ);
 
   if (bufs == NULL || nbufs == 0)
@@ -1963,6 +1980,10 @@ int uv_fs_read(uv_loop_t* loop, uv_fs_t* req,
   memcpy(req->bufs, bufs, nbufs * sizeof(*bufs));
 
   req->off = off;
+  rc = uv__platform_fs_read(loop, req, file, bufs, nbufs, off, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
+
   POST;
 }
 
@@ -2115,6 +2136,8 @@ int uv_fs_write(uv_loop_t* loop,
                 unsigned int nbufs,
                 int64_t off,
                 uv_fs_cb cb) {
+  int rc;
+
   INIT(WRITE);
 
   if (bufs == NULL || nbufs == 0)
@@ -2133,6 +2156,11 @@ int uv_fs_write(uv_loop_t* loop,
   memcpy(req->bufs, bufs, nbufs * sizeof(*bufs));
 
   req->off = off;
+
+  rc = uv__platform_fs_write(loop, req, file, bufs, nbufs, off, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
+
   POST;
 }
 
