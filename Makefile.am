@@ -114,13 +114,6 @@ libuv_la_SOURCES += src/unix/async.c \
                    src/unix/thread.c \
                    src/unix/tty.c \
                    src/unix/udp.c
-# TODO this isn't right
-# liburing_LIBRARIES = liburing.a
-# liburing_a_SOURCES = deps/liburing/src/queue.c \
-#                      deps/liburing/src/register.c \
-#                      deps/liburing/src/setup.c \
-#                      deps/liburing/src/syscall.c
-# libuv_la_LIBADD = liburing
 
 endif  # WINNT
 
@@ -469,7 +462,6 @@ endif
 if LINUX
 uvinclude_HEADERS += include/uv/linux.h
 libuv_la_CFLAGS += -D_GNU_SOURCE
-AM_CPPFLAGS += -I$(top_srcdir)/deps/liburing/src/include
 libuv_la_SOURCES += src/unix/linux-core.c \
                     src/unix/linux-inotify.c \
                     src/unix/linux-iouring.c \

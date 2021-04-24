@@ -38,6 +38,9 @@ if(ASAN AND CMAKE_C_COMPILER_ID MATCHES "AppleClang|GNU|Clang")
   set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-omit-frame-pointer -fsanitize=address")
 endif()
 
+# liburing as experimental backend
+option(LIBUV_LIBURING_EXPERIMENTAL "Use liburing as backend (experimental)" OFF)
+
 # Compiler check
 string(CONCAT is-msvc $<OR:
   $<C_COMPILER_ID:MSVC>,
@@ -247,7 +250,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   list(APPEND uv_defines _GNU_SOURCE _POSIX_C_SOURCE=200112)
-  list(APPEND uv_libraries dl rt uring)
+  list(APPEND uv_libraries dl rt)
   list(APPEND uv_sources
        src/unix/linux-core.c
        src/unix/linux-inotify.c
@@ -256,6 +259,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
        src/unix/procfs-exepath.c
        src/unix/random-getrandom.c
        src/unix/random-sysctl-linux.c)
+
+  if(LIBUV_LIBURING_EXPERIMENTAL)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(liburing liburing>=0.7)
+      if(liburing_FOUND)
+        list(APPEND uv_defines LIBUV_LIBURING=1)
+        list(APPEND uv_libraries ${liburing_LIBRARIES})
+      endif()
+    endif()
+  endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
@@ -390,20 +404,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "OS390")
   set_target_properties(uv_a PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 target_link_libraries(uv_a ${uv_libraries})
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_library(uring STATIC deps/liburing/src/queue.c
-                           deps/liburing/src/register.c
-                           deps/liburing/src/setup.c
-                           deps/liburing/src/syscall.c)
-  target_include_directories(uring PRIVATE deps/liburing/src/include)
-
-  target_include_directories(uv PUBLIC deps/liburing/src/include)
-  add_dependencies(uv uring)
-
-  target_include_directories(uv_a PUBLIC deps/liburing/src/include)
-  add_dependencies(uv_a uring)
-endif()
 
 if(LIBUV_BUILD_TESTS)
   # Small hack: use ${uv_test_sources} now to get the runner skeleton,

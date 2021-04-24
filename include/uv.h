@@ -401,7 +401,8 @@ UV_EXTERN char* uv_err_name_r(int err, char* buf, size_t buflen);
   /* read-only */                                                             \
   uv_req_type type;                                                           \
   /* private */                                                               \
-  void* reserved[5];                                                          \
+  void* reserved[4];                                                          \
+  void* iouring_buf;                                                          \
   union {                                                                     \
     uintptr_t fs_req_engine;                                                  \
     uintptr_t unused;                                                         \

@@ -103,6 +103,32 @@ STATIC_ASSERT(sizeof(&((uv_buf_t*) 0)->len) ==
 STATIC_ASSERT(offsetof(uv_buf_t, base) == offsetof(struct iovec, iov_base));
 STATIC_ASSERT(offsetof(uv_buf_t, len) == offsetof(struct iovec, iov_len));
 
+int uv__get_backend_fd(const uv_loop_t* loop) {
+  if (!(loop->flags & UV_LOOP_USE_IOURING)) {
+    return loop->backend.fd;
+  }
+#if defined(LIBUV_LIBURING)
+  return uv__io_uring_fd_get(loop);
+#else
+  return -1;
+#endif
+}
+
+void uv__set_backend_fd(uv_loop_t* loop, int fd) {
+  if (!(loop->flags & UV_LOOP_USE_IOURING)) {
+    loop->backend.fd = fd;
+    return;
+  }
+#if defined(LIBUV_LIBURING)
+  uv__io_uring_fd_set(loop, fd);
+#endif
+}
+
+#if !defined(LIBUV_LIBURING)
+int uv__has_uring_pending(const uv_loop_t* loop) {
+  return 0;
+}
+#endif
 
 uint64_t uv_hrtime(void) {
   return uv__hrtime(UV_CLOCK_PRECISE);
@@ -371,13 +397,14 @@ int uv_run(uv_loop_t* loop, uv_run_mode mode) {
   int r;
   int ran_pending;
 
-  r = uv__loop_alive(loop);
+  r = uv__loop_alive(loop) || uv__has_uring_pending(loop);
   if (!r)
     uv__update_time(loop);
 
   while (r != 0 && loop->stop_flag == 0) {
     uv__update_time(loop);
     uv__run_timers(loop);
+    uv__io_uring_submit(loop);
     ran_pending = uv__run_pending(loop);
     uv__run_idle(loop);
     uv__run_prepare(loop);
@@ -411,7 +438,7 @@ int uv_run(uv_loop_t* loop, uv_run_mode mode) {
       uv__run_timers(loop);
     }
 
-    r = uv__loop_alive(loop);
+    r = uv__loop_alive(loop) || uv__has_uring_pending(loop);
     if (mode == UV_RUN_ONCE || mode == UV_RUN_NOWAIT)
       break;
   }

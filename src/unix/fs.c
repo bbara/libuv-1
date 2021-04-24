@@ -58,6 +58,7 @@
 
 #if defined(__linux__)
 # include "sys/utsname.h"
+# include <sys/ioctl.h>
 #endif
 
 #if defined(__linux__) || defined(__sun)
@@ -68,7 +69,6 @@
 #if defined(__APPLE__)
 # include <sys/sysctl.h>
 #elif defined(__linux__) && !defined(FICLONE)
-# include <sys/ioctl.h>
 # define FICLONE _IOW(0x94, 9, int)
 #endif
 
@@ -1775,8 +1775,13 @@ int uv_fs_chown(uv_loop_t* loop,
 
 
 int uv_fs_close(uv_loop_t* loop, uv_fs_t* req, uv_file file, uv_fs_cb cb) {
+  int rc;
+
   INIT(CLOSE);
   req->file = file;
+  rc = uv__platform_fs_close(loop, req, file, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
   POST;
 }
 
@@ -1829,8 +1834,13 @@ int uv_fs_fdatasync(uv_loop_t* loop, uv_fs_t* req, uv_file file, uv_fs_cb cb) {
 
 
 int uv_fs_fstat(uv_loop_t* loop, uv_fs_t* req, uv_file file, uv_fs_cb cb) {
+  int rc;
+
   INIT(FSTAT);
   req->file = file;
+  rc = uv__platform_fs_statx(loop, req, 1, 0, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
   POST;
 }
 
@@ -1887,8 +1897,12 @@ int uv_fs_lutime(uv_loop_t* loop,
 
 
 int uv_fs_lstat(uv_loop_t* loop, uv_fs_t* req, const char* path, uv_fs_cb cb) {
+  int rc;
   INIT(LSTAT);
   PATH;
+  rc = uv__platform_fs_statx(loop, req, 0, 1, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
   POST;
 }
 
@@ -2089,8 +2103,13 @@ int uv_fs_sendfile(uv_loop_t* loop,
 
 
 int uv_fs_stat(uv_loop_t* loop, uv_fs_t* req, const char* path, uv_fs_cb cb) {
+  int rc;
+
   INIT(STAT);
   PATH;
+  rc = uv__platform_fs_statx(loop, req, 0, 0, cb);
+  if (!uv__fs_retry_with_threadpool(rc))
+    return rc;
   POST;
 }
 

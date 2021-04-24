@@ -320,7 +320,7 @@ TEST_IMPL(threadpool_cancel_fs) {
   ASSERT(n == ARRAY_SIZE(reqs));
 
   ASSERT(0 == uv_timer_init(loop, &ci.timer_handle));
-  ASSERT(0 == uv_timer_start(&ci.timer_handle, timer_cb, 10, 0));
+  ASSERT(0 == uv_timer_start(&ci.timer_handle, timer_cb, 0, 0));
   ASSERT(0 == uv_run(loop, UV_RUN_DEFAULT));
   ASSERT(n == fs_cb_called);
   ASSERT(1 == timer_cb_called);

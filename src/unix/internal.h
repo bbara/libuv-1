@@ -39,7 +39,6 @@
 
 #if defined(__linux__)
 # include "linux-syscalls.h"
-# include "liburing.h"
 #endif /* __linux__ */
 
 #if defined(__MVS__)
@@ -148,36 +147,9 @@ typedef struct uv__stream_queued_fds_s uv__stream_queued_fds_t;
 enum {
   UV_LOOP_BLOCK_SIGPROF = 1,
   /* data member of backend union is a uv__backend_data_io_uring */
-#ifdef __linux__
   UV_LOOP_USE_IOURING = UV_LOOP_RESERVED30
-#else
-  UV_LOOP_USE_IOURING = 0;
-#endif
 };
 
-/* data struct when io_uring is available */
-struct uv__backend_data_io_uring {
-  int fd;
-  int32_t pending;
-  struct io_uring ring;
-  uv_poll_t poll_handle;
-};
-
-UV_UNUSED(static int uv__get_backend_fd(const uv_loop_t* loop)) {
-  if (loop->flags & UV_LOOP_USE_IOURING) {
-    return ((struct uv__backend_data_io_uring*)loop->backend.data)->fd;
-  } else {
-    return loop->backend.fd;
-  }
-}
-
-UV_UNUSED(static void uv__set_backend_fd(uv_loop_t* loop, int fd)) {
-  if (loop->flags & UV_LOOP_USE_IOURING) {
-    ((struct uv__backend_data_io_uring*)loop->backend.data)->fd = fd;
-  } else {
-    loop->backend.fd = fd;
-  }
-}
 
 /* flags of excluding ifaddr */
 enum {
@@ -292,12 +264,24 @@ void uv__signal_loop_cleanup(uv_loop_t* loop);
 int uv__signal_loop_fork(uv_loop_t* loop);
 
 /* platform specific */
+int uv__get_backend_fd(const uv_loop_t* loop);
+void uv__set_backend_fd(uv_loop_t* loop, int fd);
 uint64_t uv__hrtime(uv_clocktype_t type);
 int uv__kqueue_init(uv_loop_t* loop);
 int uv__platform_loop_init(uv_loop_t* loop);
 void uv__platform_loop_delete(uv_loop_t* loop);
 void uv__platform_invalidate_fd(uv_loop_t* loop, int fd);
-#ifdef __linux__
+int uv__has_uring_pending(const uv_loop_t* loop);
+
+#if defined(__linux__)
+int uv__io_uring_fd_get(const uv_loop_t* loop);
+void uv__io_uring_fd_set(uv_loop_t* loop, int fd);
+
+int uv__io_uring_init(uv_loop_t* loop, int fd);
+void uv__io_uring_done(uv_loop_t* loop, uv__io_t* w, unsigned int events);
+int uv__io_uring_submit(uv_loop_t* loop);
+void uv__io_uring_delete(uv_loop_t* loop);
+
 int uv__platform_fs_read(uv_loop_t* loop,
                          uv_fs_t* req,
                          uv_os_fd_t file,
@@ -312,40 +296,21 @@ int uv__platform_fs_write(uv_loop_t* loop,
                           unsigned int nbufs,
                           int64_t off,
                           uv_fs_cb cb);
+int uv__platform_fs_close(uv_loop_t* loop,
+                          uv_fs_t* req,
+                          uv_os_fd_t file,
+                          uv_fs_cb cb);
 int uv__platform_fs_fsync(uv_loop_t* loop,
                           uv_fs_t* req,
                           uv_os_fd_t file,
                           uv_fs_cb cb);
+int uv__platform_fs_statx(uv_loop_t* loop,
+                          uv_fs_t* req,
+                          int is_fstat,
+                          int is_lstat,
+                          uv_fs_cb cb);
 int uv__platform_work_cancel(uv_req_t* req);
-#else  /* !__linux__ */
-int uv__platform_fs_read(uv_loop_t* loop,
-                         uv_fs_t* req,
-                         uv_os_fd_t file,
-                         const uv_buf_t bufs[],
-                         unsigned int nbufs,
-                         int64_t off,
-                         uv_fs_cb cb) {
-  return UV_ENOSYS;
-}
-int uv__platform_fs_write(uv_loop_t* loop,
-                          uv_fs_t* req,
-                          uv_os_fd_t file,
-                          const uv_buf_t bufs[],
-                          unsigned int nbufs,
-                          int64_t off,
-                          uv_fs_cb cb) {
-  return UV_ENOSYS;
-}
-int uv__platform_fs_fsync(uv_loop_t* loop,
-                          uv_fs_t* req,
-                          uv_os_fd_t file,
-                          uv_fs_cb cb) {
-  return UV_ENOSYS;
-}
-int uv__platform_work_cancel(uv_req_t* req) {
-  return UV_ENOSYS;
-}
-#endif  /* !__linux__ */
+#endif  /* __linux__ */
 
 /* various */
 void uv__async_close(uv_async_t* handle);
