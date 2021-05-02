@@ -23,80 +23,10 @@
 #endif
 
 #if defined(LIBUV_LIBURING)
-/* taken from the internals of liburing */
-int __sys_io_uring_enter2(int fd, unsigned to_submit, unsigned min_complete,
-                          unsigned flags, sigset_t* sig, int sz) {
-  return syscall(__NR_io_uring_enter, fd, to_submit, min_complete, flags, sig,
-                 sz);
-}
-
-/* taken from the internals of liburing */
-int __sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete,
-                         unsigned flags, sigset_t* sig) {
-  return __sys_io_uring_enter2(fd, to_submit, min_complete, flags, sig,
-                               _NSIG / 8);
-}
-
-/* taken from the internals of liburing */
-static int __io_uring_flush_sq(struct io_uring* ring) {
-  struct io_uring_sq* sq = &ring->sq;
-  const unsigned mask = *sq->kring_mask;
-  unsigned ktail, to_submit;
-
-  if (sq->sqe_head == sq->sqe_tail) {
-    ktail = *sq->ktail;
-    goto out;
-  }
-
-  /*
-   * Fill in sqes that we have queued up, adding them to the kernel ring
-   */
-  ktail = *sq->ktail;
-  to_submit = sq->sqe_tail - sq->sqe_head;
-  while (to_submit--) {
-    sq->array[ktail & mask] = sq->sqe_head & mask;
-    ktail++;
-    sq->sqe_head++;
-  }
-
-  /*
-   * Ensure that the kernel sees the SQE updates before it sees the tail
-   * update.
-   */
-  io_uring_smp_store_release(sq->ktail, ktail);
-out:
-  /*
-   * This _may_ look problematic, as we're not supposed to be reading
-   * SQ->head without acquire semantics. When we're in SQPOLL mode, the
-   * kernel submitter could be updating this right now. For non-SQPOLL,
-   * task itself does it, and there's no potential race. But even for
-   * SQPOLL, the load is going to be potentially out-of-date the very
-   * instant it's done, regardless or whether or not it's done
-   * atomically. Worst case, we're going to be over-estimating what
-   * we can submit. The point is, we need to be able to deal with this
-   * situation regardless of any perceived atomicity.
-   */
-  return ktail - *sq->khead;
-}
-
-/* taken from the internals of liburing */
-static int __io_uring_submit(struct io_uring* ring, unsigned submitted,
-                             unsigned wait_nr) {
-  unsigned flags;
-  int ret;
-
-  flags = 0;
-  if (true || wait_nr) {
-    if (wait_nr || (ring->flags & IORING_SETUP_IOPOLL))
-      flags |= IORING_ENTER_GETEVENTS;
-
-    ret = __sys_io_uring_enter(ring->ring_fd, submitted, wait_nr, flags, NULL);
-    if (ret < 0) return -errno;
-  } else
-    ret = submitted;
-
-  return ret;
-}
+struct uv__io_uring_user_data {
+  uv_req_t* req;
+  unsigned int opcode;
+};
 
 struct uv__backend_data_io_uring {
   int fd;
@@ -104,6 +34,25 @@ struct uv__backend_data_io_uring {
   struct io_uring ring;
   uv_poll_t poll_handle;
 };
+
+static int uv__io_uring_set_user_data(struct io_uring_sqe* sqe, uv_fs_t* req) {
+  struct uv__io_uring_user_data* user_data;
+
+  if (sqe == NULL || req == NULL) {
+    return UV_EINVAL;
+  }
+
+  /* store the opcode in the user_data to differ between normal and cancel
+   * requests */
+  user_data = uv__malloc(sizeof(*user_data));
+  if (user_data == NULL) return UV_ENOMEM;
+  user_data->req = (uv_req_t*)req;
+  user_data->opcode = sqe->opcode;
+  sqe->user_data = (__u64)user_data;
+  if (sqe->opcode != IORING_OP_NOP && sqe->opcode != IORING_OP_ASYNC_CANCEL)
+    req->iouring_id = user_data;
+  return 0;
+}
 
 static int uv__io_uring_fs_get_sqe(uv_loop_t* loop, uv_fs_t* req,
                                    struct io_uring_sqe** sqe_buf) {
@@ -135,13 +84,12 @@ static int uv__io_uring_fs_get_sqe(uv_loop_t* loop, uv_fs_t* req,
 
 static int uv__io_uring_fs_submit(uv_loop_t* loop, uv_fs_t* req,
                                   struct io_uring_sqe* sqe) {
+  int rc;
+
   if (loop == NULL || req == NULL) return UV_EINVAL;
 
   req->priv.fs_req_engine |= UV__ENGINE_IOURING;
-
-  /* leave the user data NULL to signal a cancel request */
-  if (sqe->opcode != IORING_OP_ASYNC_CANCEL)
-    sqe->user_data = (uint64_t)req;
+  if ((rc = uv__io_uring_set_user_data(sqe, req)) != 0) return rc;
 
   /* leave submitting to the run method of the loop */
   return 0;
@@ -264,6 +212,7 @@ int uv__io_uring_init(uv_loop_t* loop, int fd) {
 void uv__io_uring_done(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
   uv_poll_t* handle;
   struct io_uring* ring;
+  struct uv__io_uring_user_data* user_data;
   struct uv__backend_data_io_uring* backend_data;
   struct io_uring_cqe* cqe;
   uv_fs_t* req;
@@ -284,11 +233,19 @@ void uv__io_uring_done(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
 
     io_uring_cq_advance(ring, 1);
 
-    req = (void*)(uintptr_t)cqe->user_data;
-    if (req == NULL) {
-      /* this is a cancel submission, we ignore it */
+    user_data = (struct uv__io_uring_user_data*)cqe->user_data;
+    assert(user_data != NULL && "user_data is NULL");
+    req = (uv_fs_t*)user_data->req;
+    assert(req != NULL && "req of user_data is NULL");
+    if (req->result == UV_ECANCELED && user_data->opcode != IORING_OP_NOP) {
+      /* if the request is canceled we wait for the NOP which is ensured to
+       * come. the actual request and the cancel request might be not submitted,
+       * as they cancel out if submitted in the same submit call. */
+      free(user_data);
+      finished1 = 1;
       continue;
     }
+    free(user_data);
 
     /* uv_cancel sets result to UV_ECANCELED. Don't overwrite that. */
     if (req->result == 0) req->result = cqe->res;
@@ -343,22 +300,18 @@ int uv__io_uring_submit(uv_loop_t* loop) {
 
   backend_data = loop->backend.data;
 
-  /* submit work one by one, otherwise canceled jobs won't get submitted at all.
-   * In this case, the liburing_done won't be called and therefore the CBs never
-   * called too. */
-  while (__io_uring_flush_sq(&backend_data->ring)) {
-    submitted = __io_uring_submit(&backend_data->ring, 1, 0);
-    if (submitted < 0) {
-      return UV__ERR(errno);
-    }
-    assert(submitted == 1 && "submitted job amount != 1");
-    if (backend_data->pending == 0) {
-      handle = &backend_data->poll_handle;
-      uv__io_start(loop, &handle->io_watcher, POLLIN);
-      uv__handle_start(handle);
-    }
-    backend_data->pending += submitted;
+  submitted = io_uring_submit(&backend_data->ring);
+  if (submitted < 0)
+    return UV__ERR(errno);
+  else if (submitted == 0)
+    return 0;
+
+  if (backend_data->pending == 0) {
+    handle = &backend_data->poll_handle;
+    uv__io_start(loop, &handle->io_watcher, POLLIN);
+    uv__handle_start(handle);
   }
+  backend_data->pending += submitted;
   return 0;
 }
 
@@ -438,7 +391,9 @@ int uv__platform_fs_statx(uv_loop_t* loop, uv_fs_t* req, int is_fstat,
 
 int uv__platform_work_cancel(uv_req_t* req) {
   uv_loop_t* loop;
-  struct io_uring_sqe* sqe;
+  struct io_uring_sqe* sqe_nop;
+  struct io_uring_sqe* sqe_cancel;
+  int rc;
 
   /* TODO io_uring can cancel in some scenarios now. */
   if (req->type == UV_FS &&
@@ -446,10 +401,18 @@ int uv__platform_work_cancel(uv_req_t* req) {
     loop = ((uv_fs_t*)req)->loop;
     ((uv_fs_t*)req)->result = UV_ECANCELED;
 
+    /* submit a nop which indicates the cancellation */
+    if ((rc = uv__io_uring_fs_get_sqe(loop, (uv_fs_t*)req, &sqe_nop)) != 0)
+      return rc;
+    io_uring_prep_nop(sqe_nop);
+    if ((rc = uv__io_uring_fs_submit(loop, (uv_fs_t*)req, sqe_nop)) != 0)
+      return rc;
+
     /* fire and forget the actual uring cancel request */
-    if (uv__io_uring_fs_get_sqe(loop, (uv_fs_t*)req, &sqe) != 0) return 0;
-    io_uring_prep_cancel(sqe, req, 0);
-    uv__io_uring_fs_submit(loop, (uv_fs_t*)req, sqe);
+    if (uv__io_uring_fs_get_sqe(loop, (uv_fs_t*)req, &sqe_cancel) != 0)
+      return 0;
+    io_uring_prep_cancel(sqe_cancel, req->iouring_id, 0);
+    uv__io_uring_fs_submit(loop, (uv_fs_t*)req, sqe_cancel);
     return 0;
   }
 
